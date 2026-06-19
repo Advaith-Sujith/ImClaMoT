@@ -1,8 +1,46 @@
+from tqdm import trange
+import os
+from PIL import Image
 import numpy as np
 from sklearn.datasets import fetch_openml
 from sklearn.model_selection import train_test_split
 
-def init_param(features, classes, layers=[64, 32]):
+
+def img_processor(img_path):
+    img = Image.open(img_path)
+    resized = img.resize((64, 64)).convert("L")
+    array = np.asarray(resized, dtype=np.float32)/255.0
+    return array.flatten()
+
+def process_db(seed,path):
+    classes = sorted([
+    dir for dir in os.listdir(path)
+    if os.path.isdir(os.path.join(path, dir))
+    ])
+    X = []
+    y = []
+    for ind,dir in enumerate(classes):
+        class_path = os.path.join(path, dir)
+
+        for img_name in os.listdir(class_path):
+            img_path = os.path.join(class_path, img_name)
+
+            if os.path.isfile(img_path):
+                X.append(img_processor(img_path))
+                y.append(ind)
+    X = np.array(X)
+    y = np.array(y)
+
+    rng = np.random.default_rng(seed)
+    indices = rng.permutation(len(X))
+
+    return X[indices], y[indices]
+
+def pre_proc(X, y):
+    xtrain, xtest, ytrain, ytest = train_test_split(X, y, test_size=0.3, random_state=42)
+    return xtrain, xtest, ytrain, ytest
+
+def init_param(features, classes, layers):
 
     weights = []
     biases = []
@@ -94,19 +132,81 @@ def improv(weights, biases, dw, db, lr):
     
     return weights, biases
 
-def fit(x_train, y_train, features, classes, layers, epochs):
+def fit(X, y, features, classes, epochs, lr, layers=[64, 32]):
 
+    xtrain, xtest, ytrain, ytest = pre_proc(X, y)
+    pbar = trange(epochs, desc="Training")
     weights, biases = init_param(features, classes, layers)
 
-    for epoch in range(epochs):
+    for epoch in pbar:
 
-        x = x_train
-        y = y_train
+        indices = np.random.permutation(len(xtrain))
+        xtrain = xtrain[indices]
+        ytrain = ytrain[indices]
 
-        z, a = forward(x, weights, biases)
+        best_acc = 0
+        best_w = None
+        best_b = None
 
-        dw, db = backprop(x, y, a, z, classes, weights)
 
-        weights, biases = improv(weights, biases, dw, db, 0.07)
+        batch_size = 64
+        for start in range(0, len(xtrain), batch_size):
+            end = start + batch_size
+
+            x = xtrain[start:end]
+            y = ytrain[start:end]
+            z, a = forward(x, weights, biases)
+
+            dw, db = backprop(x, y, a, z, classes, weights)
+
+            weights, biases = improv(weights, biases, dw, db, lr)
+
+            if test_acc > best_acc:
+                best_acc = test_acc
+                best_w = [w.copy() for w in weights]
+                best_b = [b.copy() for b in biases]
+
+        if epoch % 10 == 0:
+            _, train_a = forward(xtrain, best_w, best_b)
+            train_acc = accuracy(ytrain, train_a[-1])
+            _, train_cost = cost(ytrain, train_a[-1], classes)
+            _, test_a = forward(xtest, best_w, best_b)
+            test_acc = accuracy(ytest, test_a[-1])
+
+            pbar.set_postfix(
+                train_acc=f"{train_acc:.4f}",
+                test_acc=f"{test_acc:.4f}",
+                loss=f"{train_cost:.4f}")
+
+    _, test_a = forward(xtest, best_w, best_b)
+
+    test_loss, test_cost = cost(ytest, test_a[-1], classes)
+    test_accuracy = accuracy(ytest, test_a[-1])
+
+    print("Test cost: ", test_cost)
+    print("Test accuracy: ", test_accuracy)
     
-    return weights, biases
+    return best_w, best_b, test_loss, test_cost, test_accuracy
+
+def model_save(weights, biases, path="model.npz"):
+    data = {}
+
+    for i, w in enumerate(weights):
+        data[f"W{i}"] = w
+
+    for i, b in enumerate(biases):
+        data[f"b{i}"] = b
+
+    np.savez(path, **data)
+
+def predict(img_path, weights, biases):
+    x = img_processor(img_path)
+    x = x.reshape(1, -1)
+
+    _, a = forward(x, weights, biases)
+
+    probs = a[-1]
+    pred = np.argmax(probs, axis=1)[0]
+
+    return pred, probs[0]
+
